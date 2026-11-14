@@ -472,6 +472,7 @@ Instance {
   lastBackup: Timestamp | null      // last successful backup; null = never backed up
   lastResult?, backupHistory?       // idea#400 summary, optional; lastResult.time is the result time
                                     // (no Instance.lastAttempt)
+  backupMethod?                     // 'stop' | 'hook' | 'none' (idea#403, Engine PR #404); unset on older Engines
 }
 
 User {
@@ -510,6 +511,25 @@ backup, not a hook fallback. There is no `Instance.lastAttempt` and no `nextRun`
 field. All new store fields are optional; with the flag absent the UI is unchanged.
 Copy is plain language (no borg, YAML, helper, or result-code tokens). See
 `src/store/backupStatus.ts`.
+
+**Backup method `none` (idea#403, agent-engine-dev#404).** An App with
+`x-app.backup.method: none` copies nothing and never gets `lastBackup`; each attempt
+(including the pre-update backup) records `lastResult = {method: 'none', result: 'OK'}`.
+`isBackupMethodNone(instance)` (`backupStatus.ts`) reads `Instance.backupMethod`
+(`'stop' | 'hook' | 'none'`, agent-engine-dev#404; defaults to `'stop'`, unset on an
+invalid spec or an older Engine/record) when it is set, so a fresh none App that has
+never run a backup is covered, and `'stop'` / `'hook'` win over an older
+`lastResult.method: 'none'` (the method changed). Only when `backupMethod` is unset does
+it fall back to `lastResult.method === 'none'`. For such an instance:
+
+- the update gate needs no backup: `majorNeedsBackup(..., methodNone)` is false and an
+  Engine `NEEDS_BACKUP` refusal does not lock the badge (`UpdateAppControl`; the
+  refusal's error line still shows);
+- `RestorePanel` shows "Not backed up: its content is on the App Disk"
+  (`METHOD_NONE_COPY`, once: the same status line is not repeated) instead of
+  "Never backed up", and offers no target disk or Restore. A none instance that still
+  has an older `lastBackup` (a real archive from before the method changed) keeps its
+  date and Restore.
 
 ### Backup Disk schedule controls (idea#400)
 
