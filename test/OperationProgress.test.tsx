@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { render, screen } from '@solidjs/testing-library';
 import OperationProgress from '../src/components/OperationProgress';
-import { MOCK_STORE } from '../src/mock/mockStore';
+import { MOCK_IDS, MOCK_STORE } from '../src/mock/mockStore';
+import { noteConnectedEngine, resetConnectedEngine } from '../src/store/connectedEngine';
 import { isRolledBackUpdateError, setupFailedText, settleFailedText, updateOpFailedPlainText, updatePendingText } from '../src/store/updateApp';
-import type { Operation, Store } from '../src/types/store';
+import type { Instance, Operation, Store } from '../src/types/store';
 import type { CommandLogStore } from '../src/types/commandLog';
 
 const NOW = Date.now();
@@ -26,8 +27,26 @@ const makeOp = (overrides: Partial<Operation>): Operation => ({
   ...overrides,
 });
 
-const storeWith = (ops: Record<string, Operation>): () => Store =>
-  () => ({ ...MOCK_STORE, operationDB: ops });
+const storeWith = (ops: Record<string, Operation>, extra: Partial<Store> = {}): () => Store =>
+  () => ({ ...MOCK_STORE, ...extra, operationDB: ops, instanceDB: { ...MOCK_STORE.instanceDB, ...(extra.instanceDB ?? {}) } });
+
+const srcInstance = (storedOn = 'disk-src'): Instance => ({
+  id: 'inst-src',
+  instanceOf: 'kolibri-1.0',
+  name: 'kolibri',
+  status: 'Stopped',
+  port: 8080,
+  serviceImages: [],
+  created: 0,
+  lastBackup: null,
+  lastStarted: 0,
+  storedOn,
+  statusCondition: null,
+  currentStep: null,
+  totalSteps: null,
+  stepLabel: null,
+  metrics: null,
+});
 
 const nullCommandLog = (): CommandLogStore | null => null;
 
@@ -210,6 +229,162 @@ describe('OperationProgress', () => {
     expect(toggle!.open).toBe(false);
     expect(toggle!.querySelector('summary')?.textContent).toBe('Technical details');
     expect(details.querySelector('.tech-details__raw')?.textContent).toBe(error);
+  });
+
+
+  const localMove = (overrides: Partial<Operation> = {}): Operation => makeOp({
+    id: 'mv-parked',
+    kind: 'moveApp',
+    status: 'Pending',
+    args: {
+      instanceId: 'inst-src',
+      sourceDiskId: 'disk-src',
+      targetDiskId: 'disk-tgt',
+      phase: 'copying',
+      wasRunning: '1',
+    },
+    error: 'RESUME_WAITING: source disk left',
+    ...overrides,
+  });
+
+  it('parked local move: waiting status, source-stopped hint, no raw RESUME_ code', () => {
+    const op = localMove();
+    render(() => <OperationProgress store={storeWith({ [op.id]: op })} commandLogStore={nullCommandLog} />);
+    expect(screen.getByText('Waiting for the disk to come back')).toBeInTheDocument();
+    const card = screen.getByTestId('operation-card-mv-parked');
+    expect(screen.getByTestId('operation-source-stopped-mv-parked').textContent).toBe(
+      'Source stopped until the move resumes or gives up',
+    );
+    expect(visibleText(card)).not.toMatch(/RESUME_/);
+    const details = screen.getByTestId('operation-parked-mv-parked');
+    expect(details.querySelector('.tech-details__raw')?.textContent).toBe('RESUME_WAITING: source disk left');
+    expect((details as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it("parked local move with wasRunning 0: waiting status, no source-stopped hint", () => {
+    const op = localMove({ args: { instanceId: 'inst-src', phase: 'copying', wasRunning: '0' } });
+    const { container } = render(() => <OperationProgress store={storeWith({ [op.id]: op })} commandLogStore={nullCommandLog} />);
+    expect(screen.getByText('Waiting for the disk to come back')).toBeInTheDocument();
+    expect(screen.queryByTestId('operation-source-stopped-mv-parked')).toBeNull();
+    expect(visibleText(container as HTMLElement)).not.toMatch(/RESUME_/);
+  });
+
+  it('resumed running local move shows the hint and keeps Running', () => {
+    const op = localMove({ status: 'Running', error: 'Retrying after interrupted run' });
+    render(() => <OperationProgress store={storeWith({ [op.id]: op })} commandLogStore={nullCommandLog} />);
+    expect(screen.getByText('Running')).toBeInTheDocument();
+    expect(screen.getByTestId('operation-source-stopped-mv-parked').textContent).toBe(
+      'Source stopped until the move resumes or gives up',
+    );
+  });
+
+
+  describe('cross-Engine parked move hint (engine#511)', () => {
+    const E1 = MOCK_IDS.ENGINE_1_ID;
+    const E2 = MOCK_IDS.ENGINE_2_ID;
+    beforeEach(() => resetConnectedEngine());
+    afterEach(() => resetConnectedEngine());
+
+    const withInst = (op: Operation, storedOn = 'disk-src') =>
+      storeWith({ [op.id]: op }, { instanceDB: { 'inst-src': srcInstance(storedOn) } });
+
+    const crossParked = (overrides: Partial<Operation> & { args?: Record<string, string>; move?: Record<string, unknown> } = {}): Operation => {
+      const op = localMove({
+        id: 'mv-cross',
+        engineId: E1,
+        args: {
+          instanceId: 'inst-src',
+          sourceDiskId: 'disk-src',
+          targetDiskId: 'disk-tgt',
+          phase: 'copying',
+          wasRunning: '1',
+          crossEngine: 'true',
+          crossResume: '1',
+          ...(overrides.args ?? {}),
+        },
+        error: 'RESUME_WAITING: source disk left',
+        ...Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== 'args' && k !== 'move')),
+      } as Partial<Operation>);
+      (op as unknown as Record<string, unknown>).move = {
+        phase: overrides.args?.phase ?? 'copying',
+        sourceEngineId: E1,
+        targetEngineId: E2,
+        sourceInstanceId: 'inst-src',
+        targetInstanceId: 'inst-src',
+        code: null,
+        resultText: null,
+        ...(overrides.move ?? {}),
+      };
+      return op;
+    };
+
+    it('shows the hint when this Console is the source Engine', () => {
+      noteConnectedEngine(E1);
+      const op = crossParked();
+      render(() => <OperationProgress store={withInst(op)} commandLogStore={nullCommandLog} />);
+      const card = screen.getByTestId('operation-card-mv-cross');
+      expect(screen.getByTestId('operation-source-stopped-mv-cross').textContent).toBe(
+        'Source stopped until the move resumes or gives up',
+      );
+      expect(screen.getByText('Waiting for the disk to come back')).toBeInTheDocument();
+      expect(visibleText(card)).not.toMatch(/RESUME_/);
+      const details = screen.getByTestId('operation-parked-mv-cross');
+      expect(details.querySelector('.tech-details__raw')?.textContent).toBe('RESUME_WAITING: source disk left');
+      expect((details as HTMLDetailsElement).open).toBe(false);
+    });
+
+    it('hides the hint when this Console is the target Engine', () => {
+      noteConnectedEngine(E2);
+      const op = crossParked();
+      const { container } = render(() => <OperationProgress store={withInst(op)} commandLogStore={nullCommandLog} />);
+      expect(screen.queryByTestId('operation-source-stopped-mv-cross')).toBeNull();
+      expect(screen.getByText('Waiting for the disk to come back')).toBeInTheDocument();
+      expect(visibleText(container as HTMLElement)).not.toMatch(/RESUME_/);
+    });
+
+    it('removing still on the source disk shows the hint; flipped storedOn does not', () => {
+      noteConnectedEngine(E1);
+      const onSource = crossParked({ args: { phase: 'removing', wasRunning: '1', crossEngine: 'true', crossResume: '1' } });
+      const first = render(() => <OperationProgress store={withInst(onSource, 'disk-src')} commandLogStore={nullCommandLog} />);
+      expect(screen.getByTestId('operation-source-stopped-mv-cross')).toBeTruthy();
+      first.unmount();
+      const flipped = crossParked({ args: { phase: 'removing', wasRunning: '1', crossEngine: 'true', crossResume: '1' } });
+      render(() => <OperationProgress store={withInst(flipped, 'disk-tgt')} commandLogStore={nullCommandLog} />);
+      expect(screen.queryByTestId('operation-source-stopped-mv-cross')).toBeNull();
+    });
+
+    it('Failed RESUME_GAVE_UP: plain sentence, raw error behind Technical details, no hint', () => {
+      noteConnectedEngine(E1);
+      const op = crossParked({
+        status: 'Failed',
+        error: 'RESUME_GAVE_UP: rsync failed',
+        completedAt: Date.now(),
+        args: { phase: 'checking', wasRunning: '1', crossEngine: 'true', crossResume: '1', resumeFailures: '3' },
+        move: { phase: 'failed', code: 'RESUME_GAVE_UP' },
+      });
+      const { container } = render(() => <OperationProgress store={withInst(op)} commandLogStore={nullCommandLog} />);
+      expect(screen.queryByTestId('operation-source-stopped-mv-cross')).toBeNull();
+      const details = screen.getByTestId('operation-error-mv-cross');
+      expect(details.querySelector('.tech-details__plain')?.textContent).toMatch(/tried several times and then stopped/);
+      expect(visibleText(container as HTMLElement)).not.toMatch(/RESUME_GAVE_UP/);
+      expect(details.querySelector('.tech-details__raw')?.textContent).toBe('RESUME_GAVE_UP: rsync failed');
+      expect((details.querySelector('details.tech-details__toggle') as HTMLDetailsElement).open).toBe(false);
+    });
+
+    it('Done SOURCE_CHANGED: Not moved sentence, no source-stopped hint', () => {
+      noteConnectedEngine(E1);
+      const op = crossParked({
+        status: 'Done',
+        error: 'MOVE STOPPED: the source was started; source kept',
+        completedAt: Date.now(),
+        args: { phase: 'done', wasRunning: '1', crossEngine: 'true', crossResume: '1' },
+        move: { phase: 'done', code: 'SOURCE_CHANGED' },
+      });
+      render(() => <OperationProgress store={withInst(op)} commandLogStore={nullCommandLog} />);
+      expect(screen.getByText('⚠ Not moved')).toBeInTheDocument();
+      expect(screen.getByTestId('operation-warning-mv-cross').textContent).toMatch(/was not moved: it changed/);
+      expect(screen.queryByTestId('operation-source-stopped-mv-cross')).toBeNull();
+    });
   });
 
 });

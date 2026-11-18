@@ -25,6 +25,8 @@ import { live, liveNow } from '../store/live';
 import { moveChecking, moveCheckingLine } from '../store/moveChecking';
 import { dismissOp, isCancellable, isOpDismissed } from '../store/dismissedOps';
 import { isMoveDoneNotMoved, moveOpOutcome } from '../store/moveApp';
+import { connectedEngineId } from '../store/connectedEngine';
+import { parkedMoveStatusText, showsSourceStoppedHint, SOURCE_STOPPED_HINT } from '../store/parkedMove';
 import { updateOpFailedPlainText } from '../store/updateApp';
 
 // ---------------------------------------------------------------------------
@@ -105,6 +107,10 @@ const OpCard: Component<OpCardProps> = (props) => {
   const isActive = () => props.op.status === 'Pending' || props.op.status === 'Running';
   // idea#498: cross-Engine Move Checking step, live from the target Engine (null = stored label).
   const checkingLine = createMemo(() => (props.op.kind === 'moveApp' ? moveCheckingLine(props.op, moveChecking(), liveNow()) : null));
+  const parkedStatus = createMemo(() => parkedMoveStatusText(props.op, props.store));
+  const sourceStopped = createMemo(() => showsSourceStoppedHint(props.op, connectedEngineId(props.store), props.store));
+  const parkedRaw = createMemo(() => (parkedStatus() ? String(props.op.error ?? '') : ''));
+  const gaveUp = createMemo(() => isFailed() && String(props.op.error ?? '').startsWith('RESUME_GAVE_UP'));
 
   const [logExpanded, setLogExpanded] = createSignal(false);
 
@@ -142,7 +148,7 @@ const OpCard: Component<OpCardProps> = (props) => {
         <span class="operation-card__kind">{KIND_LABEL[props.op.kind] ?? props.op.kind}</span>
         <div class="operation-card__top-right">
           <span class="operation-card__status">
-            {isDone() ? '✓ Done' : notMoved() ? '⚠ Not moved' : props.op.status}
+            {isDone() ? '✓ Done' : notMoved() ? '⚠ Not moved' : (parkedStatus() ?? props.op.status)}
           </span>
           <button
             class="operation-card__log-toggle"
@@ -168,6 +174,17 @@ const OpCard: Component<OpCardProps> = (props) => {
         {(label) => <div class="operation-card__step-label" data-testid={`operation-step-label-${props.op.id}`}>{label()}</div>}
       </Show>
 
+      <Show when={sourceStopped()}>
+        <div class="source-stopped-hint" data-testid={`operation-source-stopped-${props.op.id}`}>{SOURCE_STOPPED_HINT}</div>
+      </Show>
+
+      <Show when={parkedStatus() && parkedRaw() && parkedRaw() !== parkedStatus()}>
+        <details class="tech-details__toggle operation-card__parked-details" data-testid={`operation-parked-${props.op.id}`}>
+          <summary class="tech-details__summary">Technical details</summary>
+          <pre class="tech-details__raw">{parkedRaw()}</pre>
+        </details>
+      </Show>
+
       <Show when={!isFailed() && !notMoved()}>
         <StepProgressBar
           currentStep={props.op.currentStep}
@@ -183,7 +200,7 @@ const OpCard: Component<OpCardProps> = (props) => {
 
       <Show when={isFailed() && props.op.error}>
         <Show
-          when={updateOpFailedPlainText(props.op, props.store)}
+          when={updateOpFailedPlainText(props.op, props.store) || (gaveUp() ? (moveView()?.text ?? plainEngineText(props.op.error)) : null)}
           fallback={
             <div class="operation-card__error">{props.op.kind === 'setupDemo' || props.op.kind === 'removeDemo'
               ? demoErrorText(props.op.error, demoHeartbeat(live(), props.op.engineId).internet)

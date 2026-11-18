@@ -16,6 +16,7 @@ import {
   type RemoteCheck,
 } from '../store/remoteConfirm';
 import { getActiveOpsForInstance } from '../store/operations';
+import { sourceStoppedMoveFor, SOURCE_STOPPED_HINT } from '../store/parkedMove';
 import { moveErrorLineFor, moveWarningLineFor, settleMoveOutcome, type MoveCtx } from '../store/moveApp';
 import { live, liveNow, metricsFor } from '../store/live';
 import { isUpdateInFlightRefusal, startInstanceErrorText, updateInFlightEngineName } from '../store/updateApp';
@@ -341,6 +342,9 @@ const MobileAppList: Component<MobileAppListProps> = (props) => {
               </div>
 
               <div class="mobile-app-card__status">{statusText(i())}</div>
+              <Show when={sourceStoppedMoveFor(props.store(), id, engine()?.id)}>
+                <div class="source-stopped-hint" data-testid={`mobile-source-stopped-${id}`}>{SOURCE_STOPPED_HINT}</div>
+              </Show>
               <Show when={demoPackWarningText(i())}>
                 <p class="demo-warning" role="status" data-testid={`mobile-demo-pack-warning-${id}`}>{demoPackWarningText(i())}</p>
               </Show>
